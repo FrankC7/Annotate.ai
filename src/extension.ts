@@ -29,7 +29,48 @@ const addedLineDecoration = vscode.window.createTextEditorDecorationType({
 	isWholeLine: true,
 });
 
+const removedLineDecoration = vscode.window.createTextEditorDecorationType({
+	backgroundColor: new vscode.ThemeColor('diffEditor.removedTextBackground'),
+	isWholeLine: true,
+});
+
 let isHighlighting = false;
+
+let currentHunks: Array<{
+	startLine: number;
+	endLine: number;
+	newText: string;
+}> | undefined;
+let accepted: boolean[] | undefined;
+
+const codeLensProvider = new class implements vscode.CodeLensProvider {
+	provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
+		if (!currentHunks || !accepted) return [];
+		const lenses: vscode.CodeLens[] = currentHunks.map((hunk, idx) => {
+			const line = Math.min(hunk.startLine, document.lineCount - 1);
+			const range = new vscode.Range(line, 0, line, 0);
+			const status = accepted![idx] ? 'Accepted' : 'Proposed';
+			const preview = hunk.newText.trim() || 'Deletion';
+			const lens = new vscode.CodeLens(range);
+			lens.command = {
+				title: `${status}: ${preview}`,
+				command: 'annotate-ai.toggleHunk',
+				arguments: [idx]
+			};
+			return lens;
+		});
+		// Add apply lens at top
+		if (lenses.length > 0) {
+			const applyLens = new vscode.CodeLens(new vscode.Range(0, 0, 0, 0));
+			applyLens.command = {
+				title: 'Apply accepted changes',
+				command: 'annotate-ai.applyChanges'
+			};
+			lenses.push(applyLens);
+		}
+		return lenses;
+	}
+};
 
 function getCommentStyle(languageId: string) {
 	const mapping: Record<
@@ -81,12 +122,16 @@ function formatAsComment(text: string, languageId: string): string {
 }
 
 // --- ACTIVATION ---
-export function activate(context: vscode.ExtensionContext) {
+export function activate(ctx: vscode.ExtensionContext) {
 	const provider = new PreviewProvider();
 	const scheme = 'annotate-ai-preview';
 
-	context.subscriptions.push(
+	ctx.subscriptions.push(
 		vscode.workspace.registerTextDocumentContentProvider(scheme, provider)
+	);
+
+	ctx.subscriptions.push(
+		vscode.languages.registerCodeLensProvider('*', codeLensProvider)
 	);
 
 	const groqApiKey = process.env.GROQ_API_KEY;
@@ -96,6 +141,7 @@ export function activate(context: vscode.ExtensionContext) {
 		const editor = vscode.window.activeTextEditor;
 		if (editor && isHighlighting) {
 			editor.setDecorations(addedLineDecoration, []);
+			editor.setDecorations(removedLineDecoration, []);
 			isHighlighting = false;
 		}
 	});
@@ -192,7 +238,7 @@ export function activate(context: vscode.ExtensionContext) {
 							messages: [
 								{
 									role: 'user',
-									content: `Add/update comments in this ${document.languageId} file. Do not change code logic. Return full updated file content only:\n\n${currentText}`,
+									content: `Add comprehensive and detailed comments to this ${document.languageId} file. Comment every function, class, method, variable declaration, loops, and any complex logic. Explain what each part does in clear, concise comments. Do not change the code logic. Return the full updated file content only, ensuring the entire file is included without any truncation:\n\n${currentText}`,
 								},
 							],
 						});
@@ -260,70 +306,9 @@ export function activate(context: vscode.ExtensionContext) {
 				return;
 			}
 
-			const acceptedHunks: typeof hunks = [];
-			let idx = 0;
-
-			while (idx < hunks.length) {
-				const hunk = hunks[idx];
-				const highlightStart = Math.min(hunk.startLine, document.lineCount - 1);
-				const highlightEnd = Math.max(
-					highlightStart,
-					Math.min(hunk.endLine - 1, document.lineCount - 1)
-				);
-				const range = new vscode.Range(highlightStart, 0, highlightEnd, 0);
-
-				editor.setDecorations(addedLineDecoration, [range]);
-				editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
-
-				const choice = await vscode.window.showQuickPick(
-					[
-						{ label: '$(check) Keep this change', detail: hunk.newText.trim() },
-						{ label: '$(close) Deny this change' },
-						{ label: '$(check-all) Keep all remaining' },
-						{ label: '$(clear-all) Deny all remaining' },
-						{
-							label: '$(diff-multiple) Open side-by-side diff',
-							detail: 'Review all changes at once',
-						},
-						{ label: 'Cancel' },
-					],
-					{ placeHolder: `Change ${idx + 1} of ${hunks.length}`, ignoreFocusOut: true }
-				);
-
-				editor.setDecorations(addedLineDecoration, []);
-
-				if (!choice || choice.label === 'Cancel') return;
-				if (choice.label.includes('Open side-by-side diff')) {
-					await vscode.commands.executeCommand(
-						'vscode.diff',
-						previewUri,
-						updatedPreviewUri,
-						'Annotate: Preview All'
-					);
-					continue;
-				}
-
-				if (choice.label.includes('Keep this change')) {
-					acceptedHunks.push(hunk);
-					idx++;
-				} else if (choice.label.includes('Deny this change')) {
-					idx++;
-				} else if (choice.label.includes('Keep all remaining')) {
-					acceptedHunks.push(...hunks.slice(idx));
-					break;
-				} else if (choice.label.includes('Deny all remaining')) {
-					break;
-				}
-			}
-
-			if (acceptedHunks.length > 0) {
-				const edit = new vscode.WorkspaceEdit();
-				for (const h of acceptedHunks) {
-					const r = new vscode.Range(h.startLine, 0, h.endLine, 0);
-					edit.replace(document.uri, r, h.newText);
-				}
-				await vscode.workspace.applyEdit(edit);
-			}
+			currentHunks = hunks;
+			accepted = new Array(hunks.length).fill(false);
+			vscode.commands.executeCommand('vscode.executeCodeLensProviderRefresh');
 		}
 	);
 
@@ -340,7 +325,33 @@ export function activate(context: vscode.ExtensionContext) {
 		);
 	});
 
-	context.subscriptions.push(annotateCommand, annotateFileCommand, diffCommand);
+	// COMMAND 4: Toggle Hunk
+	let toggleCommand = vscode.commands.registerCommand('annotate-ai.toggleHunk', (idx: number) => {
+		if (!accepted) return;
+		accepted![idx] = !accepted![idx];
+		vscode.commands.executeCommand('vscode.executeCodeLensProviderRefresh');
+	});
+
+	// COMMAND 5: Apply Changes
+	let applyCommand = vscode.commands.registerCommand('annotate-ai.applyChanges', async () => {
+		if (!currentHunks || !accepted) return;
+		const editor = vscode.window.activeTextEditor;
+		if (!editor) return;
+		const acceptedHunks = currentHunks.filter((_, idx) => accepted![idx]);
+		if (acceptedHunks.length > 0) {
+			const edit = new vscode.WorkspaceEdit();
+			for (const h of acceptedHunks) {
+				const r = new vscode.Range(h.startLine, 0, h.endLine, 0);
+				edit.replace(editor.document.uri, r, h.newText);
+			}
+			await vscode.workspace.applyEdit(edit);
+		}
+		currentHunks = undefined;
+		accepted = undefined;
+		vscode.commands.executeCommand('vscode.executeCodeLensProviderRefresh');
+	});
+
+	ctx.subscriptions.push(annotateCommand, annotateFileCommand, diffCommand, toggleCommand, applyCommand);
 }
 
-export function deactivate() {}
+export function deactivate() { }
