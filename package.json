@@ -2,7 +2,7 @@
   "name": "annotate-ai",
   "displayName": "Annotate.ai",
   "description": "",
-  "version": "0.0.1",
+  "version": "0.1.1",
   "type": "module",
   "publisher": "Annotate-ai",
   "engines": {
@@ -18,7 +18,7 @@
       {
         "command": "annotate-ai.annotateSelection",
         "title": "Annotate: Add AI Comment",
-        "icon": "$(comment)"
+        "icon": "$(edit)"
       },
       {
         "command": "annotate-ai.annotateFile",
@@ -28,7 +28,12 @@
       {
         "command": "annotate-ai.showDiff",
         "title": "Annotate: Show Changes",
-        "icon": "$(diff-inserted)"
+        "icon": "$(eye)"
+      },
+      {
+        "command": "annotate-ai.generateReadme",
+        "title": "Annotate: Generate README",
+        "icon": "$(book)"
       }
     ],
     "menus": {
@@ -47,6 +52,11 @@
           "command": "annotate-ai.showDiff",
           "group": "navigation@3",
           "when": "editorTextFocus"
+        },
+        {
+          "command": "annotate-ai.generateReadme",
+          "group": "navigation@4",
+          "when": "editorTextFocus"
         }
       ],
       "editor/title": [
@@ -63,6 +73,11 @@
         {
           "command": "annotate-ai.showDiff",
           "group": "navigation@3",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "annotate-ai.generateReadme",
+          "group": "navigation@4",
           "when": "editorTextFocus"
         }
       ]
@@ -92,9 +107,9 @@
   },
   "dependencies": {
     "@octokit/rest": "^22.0.1",
+    "axios": "^1.13.6",
     "cross-keychain": "^1.1.0",
     "diff": "^8.0.3",
-    "dotenv": "^17.3.1",
     "groq-sdk": "^1.1.1"
   }
 }
