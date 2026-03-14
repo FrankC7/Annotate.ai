@@ -1,8 +1,5 @@
 import * as vscode from 'vscode';
 import Groq from 'groq-sdk';
-import * as dotenv from 'dotenv';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import * as Diff from 'diff';
 
 // --- HELPER CLASS ---
@@ -19,10 +16,6 @@ export class PreviewProvider implements vscode.TextDocumentContentProvider {
 }
 
 // --- GLOBALS & CONFIG ---
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const envPath = path.join(__dirname, '..', '.env');
-dotenv.config({ path: envPath });
 
 const addedLineDecoration = vscode.window.createTextEditorDecorationType({
 	backgroundColor: new vscode.ThemeColor('diffEditor.insertedTextBackground'),
@@ -35,6 +28,29 @@ const removedLineDecoration = vscode.window.createTextEditorDecorationType({
 });
 
 let isHighlighting = false;
+
+let groq: Groq | undefined;
+
+async function ensureGroq(context: vscode.ExtensionContext): Promise<Groq | undefined> {
+	if (groq) return groq;
+
+	let apiKey = await context.secrets.get('groqApiKey');
+	if (!apiKey) {
+		const input = await vscode.window.showInputBox({
+			prompt: 'Enter your Groq API Key',
+			password: true,
+			placeHolder: 'gsk_...'
+		});
+		if (input) {
+			await context.secrets.store('groqApiKey', input);
+			apiKey = input;
+		}
+	}
+	if (apiKey) {
+		groq = new Groq({ apiKey });
+	}
+	return groq;
+}
 
 function getCommentStyle(languageId: string) {
 	const mapping: Record<
@@ -94,9 +110,6 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.workspace.registerTextDocumentContentProvider(scheme, provider)
 	);
 
-	const groqApiKey = process.env.GROQ_API_KEY;
-	const groq = groqApiKey ? new Groq({ apiKey: groqApiKey }) : undefined;
-
 	vscode.workspace.onDidChangeTextDocument((event) => {
 		const editor = vscode.window.activeTextEditor;
 		if (editor && isHighlighting) {
@@ -120,8 +133,9 @@ export function activate(context: vscode.ExtensionContext) {
 				return;
 			}
 
-			if (!groqApiKey || !groq) {
-				vscode.window.showErrorMessage('GROQ_API_KEY not found.');
+			const groqInstance = await ensureGroq(context);
+			if (!groqInstance) {
+				vscode.window.showErrorMessage('Groq API key not configured. Please run the command again and enter your key.');
 				return;
 			}
 
@@ -133,7 +147,7 @@ export function activate(context: vscode.ExtensionContext) {
 						title: 'Annotate.ai: Generating...',
 					},
 					async () => {
-						const completion = await groq.chat.completions.create({
+						const completion = await groqInstance.chat.completions.create({
 							model: 'llama-3.3-70b-versatile',
 							messages: [
 								{
@@ -172,7 +186,13 @@ export function activate(context: vscode.ExtensionContext) {
 		'annotate-ai.annotateFile',
 		async () => {
 			const editor = vscode.window.activeTextEditor;
-			if (!editor || !groq) return;
+			if (!editor) return;
+
+			const groqInstance = await ensureGroq(context);
+			if (!groqInstance) {
+				vscode.window.showErrorMessage('Groq API key not configured. Please run the command again and enter your key.');
+				return;
+			}
 
 			const document = editor.document;
 			const originalText = document.getText();
@@ -186,7 +206,7 @@ export function activate(context: vscode.ExtensionContext) {
 						title: 'Annotating entire file...',
 					},
 					async () => {
-						const completion = await groq.chat.completions.create({
+						const completion = await groqInstance.chat.completions.create({
 							model: 'llama-3.3-70b-versatile',
 							messages: [
 								{
