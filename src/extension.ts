@@ -390,7 +390,152 @@ export function activate(context: vscode.ExtensionContext) {
 		);
 	});
 
-	context.subscriptions.push(annotateCommand, annotateFileCommand, diffCommand);
+	// COMMAND 4: Generate README
+	let generateReadmeCommand = vscode.commands.registerCommand('annotate-ai.generateReadme', async () => {
+		const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+		if (!workspaceFolder) {
+			vscode.window.showErrorMessage('No workspace folder found.');
+			return;
+		}
+
+		const groqInstance = await ensureGroq(context);
+		if (!groqInstance) {
+			vscode.window.showErrorMessage('Groq API key not configured. Please run the command again and enter your key.');
+			return;
+		}
+
+		let readmeContent = '';
+		try {
+			await vscode.window.withProgress(
+				{
+					location: vscode.ProgressLocation.Notification,
+					title: 'Annotate.ai: Analyzing project...',
+				},
+				async () => {
+					// Get list of files in the workspace
+					const files = await vscode.workspace.findFiles('**/*', '**/node_modules/**', 100);
+
+					// Prioritize key files
+					const keyFiles = files.filter(file => {
+						const fileName = file.fsPath.toLowerCase();
+						return fileName.includes('package.json') ||
+							fileName.includes('readme') ||
+							fileName.includes('.md') ||
+							fileName.endsWith('.ts') ||
+							fileName.endsWith('.js') ||
+							fileName.endsWith('.py') ||
+							fileName.endsWith('.rs') ||
+							fileName.endsWith('.go');
+					}).slice(0, 10); // Limit to 10 key files
+
+					let projectInfo = `# Project Analysis\n\n`;
+
+					for (const file of keyFiles) {
+						try {
+							const document = await vscode.workspace.openTextDocument(file);
+							const content = document.getText();
+							if (content.length > 5000) continue; // Skip very large files
+
+							projectInfo += `## ${file.fsPath.split('/').pop()}\n\n\`\`\`\n${content.slice(0, 2000)}\n\`\`\`\n\n`;
+						} catch (err) {
+							// Skip files that can't be read
+						}
+					}
+
+					const completion = await groqInstance.chat.completions.create({
+						model: 'llama-3.3-70b-versatile',
+						messages: [
+							{
+								role: 'user',
+								content: `You are an expert technical writer. Based on the following project files, create a comprehensive README.md file. Include:
+
+1. Project title and description
+2. Features/functionality overview
+3. Installation/setup instructions
+4. Usage examples
+5. API documentation if applicable
+6. Dependencies
+7. Contributing guidelines
+8. License information
+
+Be thorough but concise. Format properly with Markdown.
+
+Project files:
+${projectInfo}`,
+							},
+						],
+					});
+					readmeContent = completion.choices?.[0]?.message?.content ?? '';
+				}
+			);
+		} catch (err: any) {
+			vscode.window.showErrorMessage(`Error generating README: ${err.message}`);
+			return;
+		}
+
+		// Check if README.md already exists
+		const readmeUri = vscode.Uri.joinPath(workspaceFolder.uri, 'README.md');
+		let existingContent = '';
+		let readmeExists = false;
+
+		try {
+			const existingDocument = await vscode.workspace.openTextDocument(readmeUri);
+			existingContent = existingDocument.getText();
+			readmeExists = true;
+		} catch (err) {
+			// README doesn't exist, which is fine
+		}
+
+		if (readmeExists && existingContent.trim()) {
+			// Show diff and ask for approval
+			const previewUri = vscode.Uri.parse(`${scheme}:README-new.md`);
+			provider.setSnapshot(previewUri, readmeContent);
+
+			// Show the diff: existing README (left) vs new README (right)
+			await vscode.commands.executeCommand(
+				'vscode.diff',
+				readmeUri,
+				previewUri,
+				'Annotate.ai: README Changes'
+			);
+
+			// Ask user to approve or deny
+			const choice = await vscode.window.showQuickPick(
+				[
+					{ label: '$(check) Accept new README' },
+					{ label: '$(close) Keep existing README' },
+				],
+				{ placeHolder: 'Review the generated README changes', ignoreFocusOut: true }
+			);
+
+			if (!choice) {
+				// User dismissed the menu, keep existing
+				await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+				vscode.window.showInformationMessage('Existing README.md kept unchanged.');
+				return;
+			}
+
+			if (choice.label.includes('Accept new README')) {
+				// Write the new content
+				await vscode.workspace.fs.writeFile(readmeUri, Buffer.from(readmeContent, 'utf8'));
+				vscode.window.showInformationMessage('README.md updated successfully!');
+			} else {
+				// Keep existing, just close the diff
+				await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+				vscode.window.showInformationMessage('Existing README.md kept unchanged.');
+			}
+		} else {
+			// Create new README
+			await vscode.workspace.fs.writeFile(readmeUri, Buffer.from(readmeContent, 'utf8'));
+			vscode.window.showInformationMessage('README.md generated successfully!');
+
+			// Open the generated README
+			const document = await vscode.workspace.openTextDocument(readmeUri);
+			await vscode.window.showTextDocument(document);
+		}
+	});
+
+	context.subscriptions.push(annotateCommand, annotateFileCommand, diffCommand, generateReadmeCommand);
 }
 
 export function deactivate() { }

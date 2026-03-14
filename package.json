@@ -29,6 +29,11 @@
         "command": "annotate-ai.showDiff",
         "title": "Annotate: Show Changes",
         "icon": "$(eye)"
+      },
+      {
+        "command": "annotate-ai.generateReadme",
+        "title": "Annotate: Generate README",
+        "icon": "$(book)"
       }
     ],
     "menus": {
@@ -47,6 +52,11 @@
           "command": "annotate-ai.showDiff",
           "group": "navigation@3",
           "when": "editorTextFocus"
+        },
+        {
+          "command": "annotate-ai.generateReadme",
+          "group": "navigation@4",
+          "when": "editorTextFocus"
         }
       ],
       "editor/title": [
@@ -63,6 +73,11 @@
         {
           "command": "annotate-ai.showDiff",
           "group": "navigation@3",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "annotate-ai.generateReadme",
+          "group": "navigation@4",
           "when": "editorTextFocus"
         }
       ]
