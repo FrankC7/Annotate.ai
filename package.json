@@ -3,6 +3,7 @@
   "displayName": "Annotate.ai",
   "description": "",
   "version": "0.0.1",
+  "type": "module",
   "publisher": "Annotate-ai",
   "engines": {
     "vscode": "^1.110.0"
@@ -21,8 +22,8 @@
     ]
   },
   "repository": {
-  "type": "git",
-  "url": "https://github.com/FrankC7/Annotate.ai"
+    "type": "git",
+    "url": "https://github.com/FrankC7/Annotate.ai"
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
@@ -33,13 +34,19 @@
     "test": "vscode-test"
   },
   "devDependencies": {
-    "@types/vscode": "^1.110.0",
     "@types/mocha": "^10.0.10",
-    "@types/node": "22.x",
-    "typescript-eslint": "^8.56.1",
+    "@types/node": "^22.19.15",
+    "@types/vscode": "^1.110.0",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
     "eslint": "^9.39.3",
     "typescript": "^5.9.3",
-    "@vscode/test-cli": "^0.0.12",
-    "@vscode/test-electron": "^2.5.2"
+    "typescript-eslint": "^8.56.1"
+  },
+  "dependencies": {
+    "@octokit/rest": "^22.0.1",
+    "cross-keychain": "^1.1.0",
+    "dotenv": "^17.3.1",
+    "groq-sdk": "^1.1.1"
   }
 }
