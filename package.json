@@ -18,7 +18,7 @@
       {
         "command": "annotate-ai.annotateSelection",
         "title": "Annotate: Add AI Comment",
-        "icon": "$(comment)"
+        "icon": "$(edit)"
       },
       {
         "command": "annotate-ai.annotateFile",
@@ -28,7 +28,7 @@
       {
         "command": "annotate-ai.showDiff",
         "title": "Annotate: Show Changes",
-        "icon": "$(diff-inserted)"
+        "icon": "$(eye)"
       }
     ],
     "menus": {
