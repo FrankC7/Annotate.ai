@@ -16,9 +16,14 @@
   "contributes": {
     "commands": [
       {
-        "command": "annotate-ai.addAndHighlight",
-        "title": "Annotate: Add Text",
-        "icon": "$(add)"
+        "command": "annotate-ai.annotateSelection",
+        "title": "Annotate: Add AI Comment",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "annotate-ai.annotateFile",
+        "title": "Annotate: Annotate Entire File",
+        "icon": "$(comment)"
       },
       {
         "command": "annotate-ai.showDiff",
@@ -29,25 +34,35 @@
     "menus": {
       "editor/context": [
         {
-          "command": "annotate-ai.addAndHighlight",
+          "command": "annotate-ai.annotateSelection",
           "group": "navigation@1",
           "when": "editorTextFocus"
         },
         {
-          "command": "annotate-ai.showDiff",
+          "command": "annotate-ai.annotateFile",
           "group": "navigation@2",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "annotate-ai.showDiff",
+          "group": "navigation@3",
           "when": "editorTextFocus"
         }
       ],
       "editor/title": [
         {
-          "command": "annotate-ai.addAndHighlight",
+          "command": "annotate-ai.annotateSelection",
           "group": "navigation@1",
           "when": "editorTextFocus"
         },
         {
-          "command": "annotate-ai.showDiff",
+          "command": "annotate-ai.annotateFile",
           "group": "navigation@2",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "annotate-ai.showDiff",
+          "group": "navigation@3",
           "when": "editorTextFocus"
         }
       ]
@@ -78,6 +93,7 @@
   "dependencies": {
     "@octokit/rest": "^22.0.1",
     "cross-keychain": "^1.1.0",
+    "diff": "^8.0.3",
     "dotenv": "^17.3.1",
     "groq-sdk": "^1.1.1"
   }
