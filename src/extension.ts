@@ -1,8 +1,5 @@
 import * as vscode from 'vscode';
 import Groq from 'groq-sdk';
-import * as dotenv from 'dotenv';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import * as Diff from 'diff';
 
 // --- HELPER CLASS ---
@@ -19,17 +16,41 @@ export class PreviewProvider implements vscode.TextDocumentContentProvider {
 }
 
 // --- GLOBALS & CONFIG ---
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const envPath = path.join(__dirname, '..', '.env');
-dotenv.config({ path: envPath });
 
 const addedLineDecoration = vscode.window.createTextEditorDecorationType({
 	backgroundColor: new vscode.ThemeColor('diffEditor.insertedTextBackground'),
 	isWholeLine: true,
 });
 
+const removedLineDecoration = vscode.window.createTextEditorDecorationType({
+	backgroundColor: new vscode.ThemeColor('diffEditor.removedTextBackground'),
+	isWholeLine: true,
+});
+
 let isHighlighting = false;
+
+let groq: Groq | undefined;
+
+async function ensureGroq(context: vscode.ExtensionContext): Promise<Groq | undefined> {
+	if (groq) return groq;
+
+	let apiKey = await context.secrets.get('groqApiKey');
+	if (!apiKey) {
+		const input = await vscode.window.showInputBox({
+			prompt: 'Enter your Groq API Key',
+			password: true,
+			placeHolder: 'gsk_...'
+		});
+		if (input) {
+			await context.secrets.store('groqApiKey', input);
+			apiKey = input;
+		}
+	}
+	if (apiKey) {
+		groq = new Groq({ apiKey });
+	}
+	return groq;
+}
 
 function getCommentStyle(languageId: string) {
 	const mapping: Record<
@@ -89,13 +110,11 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.workspace.registerTextDocumentContentProvider(scheme, provider)
 	);
 
-	const groqApiKey = process.env.GROQ_API_KEY;
-	const groq = groqApiKey ? new Groq({ apiKey: groqApiKey }) : undefined;
-
 	vscode.workspace.onDidChangeTextDocument((event) => {
 		const editor = vscode.window.activeTextEditor;
 		if (editor && isHighlighting) {
 			editor.setDecorations(addedLineDecoration, []);
+			editor.setDecorations(removedLineDecoration, []);
 			isHighlighting = false;
 		}
 	});
@@ -114,12 +133,9 @@ export function activate(context: vscode.ExtensionContext) {
 				return;
 			}
 
-			const originalText = editor.document.getText();
-			const previewUri = vscode.Uri.parse(`${scheme}:${editor.document.uri.path}`);
-			provider.setSnapshot(previewUri, originalText);
-
-			if (!groqApiKey || !groq) {
-				vscode.window.showErrorMessage('GROQ_API_KEY not found.');
+			const groqInstance = await ensureGroq(context);
+			if (!groqInstance) {
+				vscode.window.showErrorMessage('Groq API key not configured. Please run the command again and enter your key.');
 				return;
 			}
 
@@ -131,7 +147,7 @@ export function activate(context: vscode.ExtensionContext) {
 						title: 'Annotate.ai: Generating...',
 					},
 					async () => {
-						const completion = await groq.chat.completions.create({
+						const completion = await groqInstance.chat.completions.create({
 							model: 'llama-3.3-70b-versatile',
 							messages: [
 								{
@@ -165,19 +181,22 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	);
 
-	// COMMAND 2: Annotate Entire File (The interactive solution)
+	// COMMAND 2: Annotate Entire File (Interactive + Denial logic)
 	let annotateFileCommand = vscode.commands.registerCommand(
 		'annotate-ai.annotateFile',
 		async () => {
 			const editor = vscode.window.activeTextEditor;
-			if (!editor || !groq) return;
+			if (!editor) return;
+
+			const groqInstance = await ensureGroq(context);
+			if (!groqInstance) {
+				vscode.window.showErrorMessage('Groq API key not configured. Please run the command again and enter your key.');
+				return;
+			}
 
 			const document = editor.document;
-			const currentText = document.getText();
+			const originalText = document.getText();
 			const previewUri = vscode.Uri.parse(`${scheme}:${document.uri.path}`);
-			const updatedPreviewUri = vscode.Uri.parse(
-				`${scheme}:${document.uri.path}-updated`
-			);
 
 			let updatedContent = '';
 			try {
@@ -187,12 +206,12 @@ export function activate(context: vscode.ExtensionContext) {
 						title: 'Annotating entire file...',
 					},
 					async () => {
-						const completion = await groq.chat.completions.create({
+						const completion = await groqInstance.chat.completions.create({
 							model: 'llama-3.3-70b-versatile',
 							messages: [
 								{
 									role: 'user',
-									content: `Add/update comments in this ${document.languageId} file. Do not change code logic. Return full updated file content only:\n\n${currentText}`,
+									content: `You are an expert code reviewer. For the following ${document.languageId} source file, ensure every function and logical block has a brief comment describing intent. Add comments where missing, and update existing comments to be accurate. Do not change code behavior. Remove any leading/trailing quotes from comment text. Respond with the full updated file content only (no explanations).\n\n${originalText}`,
 								},
 							],
 						});
@@ -204,7 +223,6 @@ export function activate(context: vscode.ExtensionContext) {
 				return;
 			}
 
-			// Strip markdown fences if LLM included them
 			let cleanedContent = updatedContent.trim();
 			if (cleanedContent.startsWith('```')) {
 				const lines = cleanedContent.split('\n');
@@ -213,116 +231,148 @@ export function activate(context: vscode.ExtensionContext) {
 				cleanedContent = lines.join('\n');
 			}
 
-			provider.setSnapshot(previewUri, currentText);
-			provider.setSnapshot(updatedPreviewUri, cleanedContent);
+			// Store original snapshot for potential Cancel revert
+			provider.setSnapshot(previewUri, originalText);
 
-			const diffParts = Diff.diffLines(currentText, cleanedContent);
-			const hunks: Array<{
-				startLine: number;
-				endLine: number;
-				newText: string;
+			const diffParts = Diff.diffLines(originalText, cleanedContent);
+			const reviewItems: Array<{
+				newLineStart: number;
+				newLineEnd: number;
+				originalText: string;
+				addedText: string;
+				originalLineCount: number;
+				addedLineCount: number;
 			}> = [];
-			let currentLine = 0;
 
+			let newLineIdx = 0;
 			for (let i = 0; i < diffParts.length; i++) {
 				const part = diffParts[i];
 				if (part.removed) {
 					const nextPart = diffParts[i + 1];
 					if (nextPart && nextPart.added) {
-						hunks.push({
-							startLine: currentLine,
-							endLine: currentLine + part.count!,
-							newText: nextPart.value,
+						reviewItems.push({
+							newLineStart: newLineIdx,
+							newLineEnd: newLineIdx + nextPart.count!,
+							originalText: part.value,
+							addedText: nextPart.value,
+							originalLineCount: part.count!,
+							addedLineCount: nextPart.count!,
 						});
-						currentLine += part.count!;
+						newLineIdx += nextPart.count!;
 						i++;
 					} else {
-						hunks.push({
-							startLine: currentLine,
-							endLine: currentLine + part.count!,
-							newText: '',
+						reviewItems.push({
+							newLineStart: newLineIdx,
+							newLineEnd: newLineIdx,
+							originalText: part.value,
+							addedText: '',
+							originalLineCount: part.count!,
+							addedLineCount: 0,
 						});
-						currentLine += part.count!;
 					}
 				} else if (part.added) {
-					hunks.push({
-						startLine: currentLine,
-						endLine: currentLine,
-						newText: part.value,
+					reviewItems.push({
+						newLineStart: newLineIdx,
+						newLineEnd: newLineIdx + part.count!,
+						originalText: '',
+						addedText: part.value,
+						originalLineCount: 0,
+						addedLineCount: part.count!,
 					});
+					newLineIdx += part.count!;
 				} else {
-					currentLine += part.count!;
+					newLineIdx += part.count!;
 				}
 			}
 
-			if (hunks.length === 0) {
-				vscode.window.showInformationMessage('No changes detected.');
-				return;
-			}
+			// Apply all AI changes at once (Creates a single Undo entry)
+			await editor.edit((editBuilder) => {
+				const fullRange = new vscode.Range(0, 0, document.lineCount, 0);
+				editBuilder.replace(fullRange, cleanedContent);
+			});
 
-			const acceptedHunks: typeof hunks = [];
 			let idx = 0;
+			let lineDrift = 0;
+			let userCancelledReview = true;
 
-			while (idx < hunks.length) {
-				const hunk = hunks[idx];
-				const highlightStart = Math.min(hunk.startLine, document.lineCount - 1);
-				const highlightEnd = Math.max(
-					highlightStart,
-					Math.min(hunk.endLine - 1, document.lineCount - 1)
+			while (idx < reviewItems.length) {
+				const item = reviewItems[idx];
+				const currentStart = Math.max(0, item.newLineStart + lineDrift);
+				const currentEnd = Math.max(currentStart, item.newLineEnd + lineDrift);
+				const range = new vscode.Range(
+					Math.min(currentStart, document.lineCount - 1), 0,
+					Math.min(currentEnd, document.lineCount), 0
 				);
-				const range = new vscode.Range(highlightStart, 0, highlightEnd, 0);
 
-				editor.setDecorations(addedLineDecoration, [range]);
+				if (item.addedText === '' && item.originalLineCount > 0) {
+					editor.setDecorations(removedLineDecoration, [range]);
+				} else {
+					editor.setDecorations(addedLineDecoration, [range]);
+				}
+
 				editor.revealRange(range, vscode.TextEditorRevealType.InCenter);
 
 				const choice = await vscode.window.showQuickPick(
 					[
-						{ label: '$(check) Keep this change', detail: hunk.newText.trim() },
+						{ label: '$(check) Keep this change' },
 						{ label: '$(close) Deny this change' },
-						{ label: '$(check-all) Keep all remaining' },
-						{ label: '$(clear-all) Deny all remaining' },
-						{
-							label: '$(diff-multiple) Open side-by-side diff',
-							detail: 'Review all changes at once',
-						},
+						{ label: '$(check-all) Keep all remaining changes' },
+						{ label: '$(clear-all) Deny all remaining changes' },
 						{ label: 'Cancel' },
 					],
-					{ placeHolder: `Change ${idx + 1} of ${hunks.length}`, ignoreFocusOut: true }
+					{ placeHolder: `Reviewing comment ${idx + 1} of ${reviewItems.length}`, ignoreFocusOut: true }
 				);
 
 				editor.setDecorations(addedLineDecoration, []);
+				editor.setDecorations(removedLineDecoration, []);
 
-				if (!choice || choice.label === 'Cancel') return;
-				if (choice.label.includes('Open side-by-side diff')) {
-					await vscode.commands.executeCommand(
-						'vscode.diff',
-						previewUri,
-						updatedPreviewUri,
-						'Annotate: Preview All'
-					);
-					continue;
+				// Case 1: Escape key or explicit "Cancel"
+				if (!choice || choice.label === 'Cancel') {
+					break;
 				}
 
+				// Case 2: Keep current change
 				if (choice.label.includes('Keep this change')) {
-					acceptedHunks.push(hunk);
 					idx++;
-				} else if (choice.label.includes('Deny this change')) {
+				}
+				// Case 3: Deny current change
+				else if (choice.label.includes('Deny this change')) {
+					await editor.edit(eb => eb.replace(range, item.originalText), { undoStopBefore: false, undoStopAfter: false });
+					lineDrift += (item.originalLineCount - item.addedLineCount);
 					idx++;
-				} else if (choice.label.includes('Keep all remaining')) {
-					acceptedHunks.push(...hunks.slice(idx));
-					break;
-				} else if (choice.label.includes('Deny all remaining')) {
+				}
+				// Case 4: Keep everything left
+				else if (choice.label.includes('Keep all remaining')) {
+					userCancelledReview = false;
 					break;
 				}
+				// Case 5: Revert everything from here to the end
+				else if (choice.label.includes('Deny all remaining')) {
+					userCancelledReview = false; // We are intentionally finishing
+					while (idx < reviewItems.length) {
+						const remItem = reviewItems[idx];
+						const rStart = remItem.newLineStart + lineDrift;
+						const rEnd = remItem.newLineEnd + lineDrift;
+						const rRange = new vscode.Range(Math.min(rStart, document.lineCount - 1), 0, Math.min(rEnd, document.lineCount), 0);
+
+						await editor.edit(eb => eb.replace(rRange, remItem.originalText), { undoStopBefore: false, undoStopAfter: false });
+						lineDrift += (remItem.originalLineCount - remItem.addedLineCount);
+						idx++;
+					}
+					break;
+				}
+
+				if (idx === reviewItems.length) userCancelledReview = false;
 			}
 
-			if (acceptedHunks.length > 0) {
-				const edit = new vscode.WorkspaceEdit();
-				for (const h of acceptedHunks) {
-					const r = new vscode.Range(h.startLine, 0, h.endLine, 0);
-					edit.replace(document.uri, r, h.newText);
-				}
-				await vscode.workspace.applyEdit(edit);
+			// If the user hit Escape or "Cancel", revert the whole file to the snapshot
+			if (userCancelledReview) {
+				await editor.edit(eb => {
+					eb.replace(new vscode.Range(0, 0, document.lineCount, 0), originalText);
+				});
+				vscode.window.showInformationMessage('Annotate.ai: File reverted to original state.');
+			} else {
+				vscode.window.showInformationMessage('Annotate.ai: Session complete.');
 			}
 		}
 	);
@@ -340,7 +390,152 @@ export function activate(context: vscode.ExtensionContext) {
 		);
 	});
 
-	context.subscriptions.push(annotateCommand, annotateFileCommand, diffCommand);
+	// COMMAND 4: Generate README
+	let generateReadmeCommand = vscode.commands.registerCommand('annotate-ai.generateReadme', async () => {
+		const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+		if (!workspaceFolder) {
+			vscode.window.showErrorMessage('No workspace folder found.');
+			return;
+		}
+
+		const groqInstance = await ensureGroq(context);
+		if (!groqInstance) {
+			vscode.window.showErrorMessage('Groq API key not configured. Please run the command again and enter your key.');
+			return;
+		}
+
+		let readmeContent = '';
+		try {
+			await vscode.window.withProgress(
+				{
+					location: vscode.ProgressLocation.Notification,
+					title: 'Annotate.ai: Analyzing project...',
+				},
+				async () => {
+					// Get list of files in the workspace
+					const files = await vscode.workspace.findFiles('**/*', '**/node_modules/**', 100);
+
+					// Prioritize key files
+					const keyFiles = files.filter(file => {
+						const fileName = file.fsPath.toLowerCase();
+						return fileName.includes('package.json') ||
+							fileName.includes('readme') ||
+							fileName.includes('.md') ||
+							fileName.endsWith('.ts') ||
+							fileName.endsWith('.js') ||
+							fileName.endsWith('.py') ||
+							fileName.endsWith('.rs') ||
+							fileName.endsWith('.go');
+					}).slice(0, 10); // Limit to 10 key files
+
+					let projectInfo = `# Project Analysis\n\n`;
+
+					for (const file of keyFiles) {
+						try {
+							const document = await vscode.workspace.openTextDocument(file);
+							const content = document.getText();
+							if (content.length > 5000) continue; // Skip very large files
+
+							projectInfo += `## ${file.fsPath.split('/').pop()}\n\n\`\`\`\n${content.slice(0, 2000)}\n\`\`\`\n\n`;
+						} catch (err) {
+							// Skip files that can't be read
+						}
+					}
+
+					const completion = await groqInstance.chat.completions.create({
+						model: 'llama-3.3-70b-versatile',
+						messages: [
+							{
+								role: 'user',
+								content: `You are an expert technical writer. Based on the following project files, create a comprehensive README.md file. Include:
+
+1. Project title and description
+2. Features/functionality overview
+3. Installation/setup instructions
+4. Usage examples
+5. API documentation if applicable
+6. Dependencies
+7. Contributing guidelines
+8. License information
+
+Be thorough but concise. Format properly with Markdown.
+
+Project files:
+${projectInfo}`,
+							},
+						],
+					});
+					readmeContent = completion.choices?.[0]?.message?.content ?? '';
+				}
+			);
+		} catch (err: any) {
+			vscode.window.showErrorMessage(`Error generating README: ${err.message}`);
+			return;
+		}
+
+		// Check if README.md already exists
+		const readmeUri = vscode.Uri.joinPath(workspaceFolder.uri, 'README.md');
+		let existingContent = '';
+		let readmeExists = false;
+
+		try {
+			const existingDocument = await vscode.workspace.openTextDocument(readmeUri);
+			existingContent = existingDocument.getText();
+			readmeExists = true;
+		} catch (err) {
+			// README doesn't exist, which is fine
+		}
+
+		if (readmeExists && existingContent.trim()) {
+			// Show diff and ask for approval
+			const previewUri = vscode.Uri.parse(`${scheme}:README-new.md`);
+			provider.setSnapshot(previewUri, readmeContent);
+
+			// Show the diff: existing README (left) vs new README (right)
+			await vscode.commands.executeCommand(
+				'vscode.diff',
+				readmeUri,
+				previewUri,
+				'Annotate.ai: README Changes'
+			);
+
+			// Ask user to approve or deny
+			const choice = await vscode.window.showQuickPick(
+				[
+					{ label: '$(check) Accept new README' },
+					{ label: '$(close) Keep existing README' },
+				],
+				{ placeHolder: 'Review the generated README changes', ignoreFocusOut: true }
+			);
+
+			if (!choice) {
+				// User dismissed the menu, keep existing
+				await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+				vscode.window.showInformationMessage('Existing README.md kept unchanged.');
+				return;
+			}
+
+			if (choice.label.includes('Accept new README')) {
+				// Write the new content
+				await vscode.workspace.fs.writeFile(readmeUri, Buffer.from(readmeContent, 'utf8'));
+				vscode.window.showInformationMessage('README.md updated successfully!');
+			} else {
+				// Keep existing, just close the diff
+				await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+				vscode.window.showInformationMessage('Existing README.md kept unchanged.');
+			}
+		} else {
+			// Create new README
+			await vscode.workspace.fs.writeFile(readmeUri, Buffer.from(readmeContent, 'utf8'));
+			vscode.window.showInformationMessage('README.md generated successfully!');
+
+			// Open the generated README
+			const document = await vscode.workspace.openTextDocument(readmeUri);
+			await vscode.window.showTextDocument(document);
+		}
+	});
+
+	context.subscriptions.push(annotateCommand, annotateFileCommand, diffCommand, generateReadmeCommand);
 }
 
-export function deactivate() {}
+export function deactivate() { }
