@@ -15,10 +15,42 @@
   "contributes": {
     "commands": [
       {
-        "command": "annotate-ai.helloWorld",
-        "title": "Hello World"
+        "command": "annotate-ai.addAndHighlight",
+        "title": "Annotate: Add Text",
+        "icon": "$(add)"
+      },
+      {
+        "command": "annotate-ai.showDiff",
+        "title": "Annotate: Show Changes",
+        "icon": "$(diff-inserted)"
       }
-    ]
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "annotate-ai.addAndHighlight",
+          "group": "navigation@1",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "annotate-ai.showDiff",
+          "group": "navigation@2",
+          "when": "editorTextFocus"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "annotate-ai.addAndHighlight",
+          "group": "navigation@1",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "annotate-ai.showDiff",
+          "group": "navigation@2",
+          "when": "editorTextFocus"
+        }
+      ]
+    }
   },
   "repository": {
   "type": "git",
