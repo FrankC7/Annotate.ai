@@ -2,7 +2,7 @@
   "name": "annotate-ai",
   "displayName": "Annotate.ai",
   "description": "AI-powered code annotation and authorship analysis.",
-  "version": "0.1.1",
+  "version": "1.0.0",
   "type": "module",
   "publisher": "Annotate-ai",
   "engines": {
@@ -63,6 +63,23 @@
         "command": "annotate-ai.changeApiKeys",
         "title": "Annotate: Change API Keys",
         "category": "Annotate.ai"
+      },
+      {
+        "command": "annotate-ai.setAstraCredentials",
+        "title": "Annotate: Set Astra DB Credentials",
+        "category": "Annotate.ai"
+      },
+      {
+        "command": "annotate-ai.indexWorkspace",
+        "title": "Annotate: Index Workspace for RAG",
+        "category": "Annotate.ai",
+        "icon": "$(database)"
+      },
+      {
+        "command": "annotate-ai.indexCommits",
+        "title": "Annotate: Index Commit History for RAG",
+        "category": "Annotate.ai",
+        "icon": "$(git-commit)"
       },
       {
         "command": "annotate-ai.generateCommitMessage",
@@ -131,6 +148,21 @@
           "command": "annotate-ai.changeApiKeys",
           "group": "navigation@9",
           "when": "editorTextFocus"
+        },
+        {
+          "command": "annotate-ai.setAstraCredentials",
+          "group": "navigation@10",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "annotate-ai.indexWorkspace",
+          "group": "navigation@11",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "annotate-ai.indexCommits",
+          "group": "navigation@12",
+          "when": "editorTextFocus"
         }
       ],
       "editor/title": [
@@ -197,7 +229,9 @@
     "typescript-eslint": "^8.56.1"
   },
   "dependencies": {
+    "@datastax/astra-db-ts": "^2.2.1",
     "@octokit/rest": "^22.0.1",
+    "@xenova/transformers": "^2.17.2",
     "axios": "^1.13.6",
     "cross-keychain": "^1.1.0",
     "diff": "^8.0.3",

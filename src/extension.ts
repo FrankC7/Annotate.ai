@@ -5,6 +5,8 @@ import * as Diff from "diff";
 import * as cp from "child_process";
 import { promisify } from "util";
 import { FileHistoryViewProvider } from "./fileHistoryView.js";
+import { initAstra, ensureCollections, getAstraDb } from "./astra.js";
+import { getEmbedding, chunkText } from "./embeddings.js";
 
 const exec = promisify(cp.exec);
 
@@ -60,6 +62,33 @@ class AIHoverProvider implements vscode.HoverProvider {
 		const groqInstance = await ensureGroq(extensionContext);
 		if (!groqInstance) return null;
 
+		// Try to ensure Astra DB is ready for RAG (optional for hover, fallback if not set)
+		const astraReady = await ensureAstra(extensionContext);
+		let ragContext = "";
+
+		if (astraReady) {
+			try {
+				const db = getAstraDb()!;
+				const collection = await db.collection("code_snippets");
+				
+				// Embed the hovered line to find similar context
+				const vector = await getEmbedding(lineText);
+				const results = await collection.find(
+					{},
+					{ sort: { $vector: vector }, limit: 3 }
+				).toArray();
+
+				if (results.length > 0) {
+					ragContext = "Here are some snippets from the codebase that might be relevant to the hovered line:\n";
+					results.forEach((r: any) => {
+						ragContext += `File: ${r.filePath}\n\`\`\`\n${r.content}\n\`\`\`\n\n`;
+					});
+				}
+			} catch (e) {
+				console.error("Astra DB RAG failed for Hover Explainer:", e);
+			}
+		}
+
 		// 3. Create AbortController for cancellable requests
 		const abortController = new AbortController();
 		const tokenListener = token.onCancellationRequested(() => {
@@ -74,7 +103,7 @@ class AIHoverProvider implements vscode.HoverProvider {
 						{
 							role: "system",
 							content:
-								"You are a coding assistant. Provide a single-sentence, concise explanation of the logic in this line of code.",
+								"You are a coding assistant inside VS Code. Provide a single-sentence, concise explanation of the logic in the line of code the user is hovering over.\n\n" + ragContext,
 						},
 						{ role: "user", content: `Explain this line: ${lineText}` },
 					],
@@ -313,6 +342,37 @@ async function ensureGroq(
 	return groq;
 }
 
+// Ensure Astra DB connects
+async function ensureAstra(context: vscode.ExtensionContext): Promise<boolean> {
+	if (getAstraDb()) return true;
+
+	const token = await context.secrets.get("astraToken");
+	const endpoint = await context.secrets.get("astraEndpoint");
+
+	if (!token || !endpoint) {
+		const setupChoice = await vscode.window.showInformationMessage(
+			"Astra DB credentials are required for RAG features. Would you like to set them up now?",
+			"Yes", "No"
+		);
+		if (setupChoice === "Yes") {
+			await vscode.commands.executeCommand("annotate-ai.setAstraCredentials");
+			// Check again after prompt
+			const newToken = await context.secrets.get("astraToken");
+			const newEndpoint = await context.secrets.get("astraEndpoint");
+			if (newToken && newEndpoint) {
+				const db = initAstra({ token: newToken, endpoint: newEndpoint });
+				await ensureCollections(db);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	const db = initAstra({ token, endpoint });
+	await ensureCollections(db);
+	return true;
+}
+
 async function getGitRepository(): Promise<any> {
 	const gitExtension = vscode.extensions.getExtension<any>("vscode.git");
 	if (!gitExtension) return null;
@@ -392,7 +452,39 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand("annotate-ai.changeApiKeys", async () => {
 			await context.secrets.delete("groqApiKey");
 			groq = undefined;
-			vscode.window.showInformationMessage("API Keys cleared.");
+			vscode.window.showInformationMessage("Groq API Key cleared.");
+		}),
+
+		vscode.commands.registerCommand("annotate-ai.setAstraCredentials", async () => {
+			const endpoint = await vscode.window.showInputBox({
+				prompt: "Enter your Astra DB API Endpoint",
+				placeHolder: "https://<id>-<region>.apps.astra.datastax.com",
+				ignoreFocusOut: true
+			});
+			if (!endpoint) return;
+
+			const token = await vscode.window.showInputBox({
+				prompt: "Enter your Astra DB Application Token",
+				placeHolder: "AstraCS:...",
+				password: true,
+				ignoreFocusOut: true
+			});
+			if (!token) return;
+
+			await context.secrets.store("astraEndpoint", endpoint);
+			await context.secrets.store("astraToken", token);
+			
+			vscode.window.showInformationMessage("Astra DB credentials configured successfully.");
+			
+			// Initialize immediately map the DB and Collections
+			await vscode.window.withProgress({
+				location: vscode.ProgressLocation.Notification,
+				title: "Connecting to Astra DB..."
+			}, async () => {
+				const db = initAstra({ endpoint, token });
+				await ensureCollections(db);
+				vscode.window.showInformationMessage("Astra DB RAG Collections ready.");
+			});
 		}),
 
 		vscode.commands.registerCommand("annotate-ai.toggleGitBlame", () => {
@@ -410,6 +502,157 @@ export function activate(context: vscode.ExtensionContext) {
 			}
 		),
 
+		// INDEXING COMMAND 1: Workspace
+		vscode.commands.registerCommand("annotate-ai.indexWorkspace", async () => {
+			const isReady = await ensureAstra(context);
+			if (!isReady) return;
+
+			const db = getAstraDb()!;
+			const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+			if (!workspaceFolder) {
+				vscode.window.showErrorMessage('No workspace folder found to index.');
+				return;
+			}
+
+			await vscode.window.withProgress({
+				location: vscode.ProgressLocation.Notification,
+				title: "Indexing Workspace Code to Astra DB (RAG)...",
+				cancellable: true
+			}, async (progress, token) => {
+				try {
+					const files = await vscode.workspace.findFiles('**/*', '**/node_modules/**', 2000);
+					const validExtensions = ['.ts', '.js', '.py', '.rs', '.go', '.md', '.json'];
+					const indexableFiles = files.filter(f => validExtensions.some(ext => f.fsPath.endsWith(ext)));
+
+					progress.report({ message: `Found ${indexableFiles.length} files. Indexing...`, increment: 10 });
+					
+					const collection = await db.collection('code_snippets');
+					let processedFiles = 0;
+
+					for (const file of indexableFiles) {
+						if (token.isCancellationRequested) break;
+						
+						try {
+							const doc = await vscode.workspace.openTextDocument(file);
+							const content = doc.getText();
+							if (content.length > 50000) continue; // Skip huge files
+
+							const relativePath = vscode.workspace.asRelativePath(file);
+							const chunks = chunkText(content);
+							
+							for (let i = 0; i < chunks.length; i++) {
+								const chunk = chunks[i];
+								const vector = await getEmbedding(chunk.text);
+								
+								// UPSERT: We use custom IDs combining path + chunk index
+								const docId = `${relativePath}::${i}`;
+								
+								await collection.insertOne({
+									_id: docId,
+									$vector: vector,
+									filePath: relativePath,
+									content: chunk.text,
+									startLine: chunk.startLine,
+									endLine: chunk.endLine,
+									chunkIndex: i,
+									totalChunks: chunks.length
+								});
+							}
+							
+							processedFiles++;
+							progress.report({ 
+								increment: (90 / indexableFiles.length), 
+								message: `Indexed ${relativePath} (${processedFiles}/${indexableFiles.length})` 
+							});
+						} catch (e) {
+							// Skip files that fail to read/embed
+						}
+					}
+
+					vscode.window.showInformationMessage(`Successfully indexed ${processedFiles} files to Astra DB.`);
+				} catch (e: any) {
+					vscode.window.showErrorMessage(`Indexing failed: ${e.message}`);
+				}
+			});
+		}),
+
+		// INDEXING COMMAND 2: Commit History
+		vscode.commands.registerCommand("annotate-ai.indexCommits", async () => {
+			const isReady = await ensureAstra(context);
+			if (!isReady) return;
+
+			const repo = await getGitRepository();
+			if (!repo) {
+				vscode.window.showErrorMessage("No active Git repository found.");
+				return;
+			}
+
+			const db = getAstraDb()!;
+
+			await vscode.window.withProgress({
+				location: vscode.ProgressLocation.Notification,
+				title: "Indexing Commit History to Astra DB...",
+				cancellable: true
+			}, async (progress, token) => {
+				try {
+					progress.report({ message: "Fetching git log...", increment: 10 });
+					// Get last 50 commits with full message and tree hash to get diffs
+					const { stdout: commitsStr } = await exec('git log -n 50 --pretty=format:"%H|%an|%cI|%B" --compact-summary', {
+						cwd: repo.rootUri.fsPath,
+						maxBuffer: 1024 * 1024 * 10 // 10MB limit
+					});
+
+					const commits = commitsStr.split(/\n(?=[0-9a-f]{40}\|)/);
+					progress.report({ message: `Found ${commits.length} commits. Processing...`, increment: 10 });
+					
+					const collection = await db.collection('commit_history');
+					let processed = 0;
+
+					for (const commitRaw of commits) {
+						if (token.isCancellationRequested) break;
+						
+						const firstPipe = commitRaw.indexOf('|');
+						const secondPipe = commitRaw.indexOf('|', firstPipe + 1);
+						const thirdPipe = commitRaw.indexOf('|', secondPipe + 1);
+						
+						if (firstPipe === -1 || secondPipe === -1 || thirdPipe === -1) continue;
+						
+						const hash = commitRaw.substring(0, firstPipe);
+						const author = commitRaw.substring(firstPipe + 1, secondPipe);
+						const date = commitRaw.substring(secondPipe + 1, thirdPipe);
+						const messageBlock = commitRaw.substring(thirdPipe + 1).trim();
+						
+						try {
+							// get the actual git diff for this commit
+							const { stdout: diff } = await exec(`git show ${hash} --patch`, { cwd: repo.rootUri.fsPath });
+							if (!diff) continue;
+
+							// To prevent blowing up vector sizes, only embed the first 1500 chars of the diff
+							const truncatedDiff = diff.slice(0, 1500);
+							const vector = await getEmbedding(truncatedDiff);
+							
+							await collection.insertOne({
+								_id: hash,
+								$vector: vector,
+								message: messageBlock,
+								author,
+								date,
+								diffPreview: truncatedDiff
+							});
+							
+							processed++;
+							progress.report({ increment: (80 / commits.length), message: `Indexed commit ${hash.slice(0, 7)}` });
+						} catch (e) {
+							// Skip this commit on error
+						}
+					}
+					vscode.window.showInformationMessage(`Successfully indexed ${processed} historical commits to Astra DB.`);
+				} catch (e: any) {
+					vscode.window.showErrorMessage(`Commit indexing failed: ${e.message}`);
+				}
+			});
+		}),
+
 		vscode.commands.registerCommand(
 			"annotate-ai.generateCommitMessage",
 			async () => {
@@ -426,14 +669,44 @@ export function activate(context: vscode.ExtensionContext) {
 						vscode.window.showWarningMessage("No staged changes found.");
 						return;
 					}
+
+					// Astra DB RAG: Find similar historical commits to copy the repo's style
+					let styleContext = "Output only a raw conventional commit message.";
+					const astraReady = await ensureAstra(context);
+					
+					if (astraReady) {
+						try {
+							const db = getAstraDb()!;
+							const collection = await db.collection("commit_history");
+							
+							const diffPreview = diff.slice(0, 1500); 
+							const vector = await getEmbedding(diffPreview);
+							
+							const results = await collection.find(
+								{},
+								{ sort: { $vector: vector }, limit: 3 }
+							).toArray();
+
+							if (results.length > 0) {
+								styleContext = "You are an expert developer. Write a commit message for the pending changes.\n\nCRITICAL: You MUST flawlessly mimic the style, formatting, and conventions of these previous repository commits:\n\n";
+								results.forEach((r: any) => {
+									styleContext += `Example Past Commit:\n${r.message}\n\n`;
+								});
+								styleContext += "Now, generate the new commit message matching this exact format. Output only the message, no introductions.";
+							}
+						} catch (e) {
+							console.error("Astra DB RAG failed for Commit Generation:", e);
+						}
+					}
+
 					const res = await groqInstance.chat.completions.create({
 						model: "llama-3.3-70b-versatile",
 						messages: [
 							{
 								role: "system",
-								content: "Output only a raw conventional commit message.",
+								content: styleContext,
 							},
-							{ role: "user", content: `Diff: ${diff.slice(0, 10000)}` },
+							{ role: "user", content: `Pending Diff: ${diff.slice(0, 10000)}` },
 						],
 					});
 					repo.inputBox.value = res.choices[0].message.content!.trim();
@@ -529,6 +802,36 @@ export function activate(context: vscode.ExtensionContext) {
 							return;
 						}
 
+						// Astra DB RAG for Architectural context
+						const astraReady = await ensureAstra(context);
+						let ragContext = "";
+						
+						if (astraReady) {
+							try {
+								const db = getAstraDb()!;
+								const collection = await db.collection("code_snippets");
+								
+								// We embed the first chunk of the diff to find relevance. 
+								// In a robust implementation, we'd chunk the diff by file and query per-file.
+								const diffPreview = diff.slice(0, 1500); 
+								const vector = await getEmbedding(diffPreview);
+								
+								const results = await collection.find(
+									{},
+									{ sort: { $vector: vector }, limit: 5 }
+								).toArray();
+
+								if (results.length > 0) {
+									ragContext = "\n\nCRITICAL ARCHITECTURAL CONTEXT (From Repository):\n";
+									results.forEach((r: any) => {
+										ragContext += `--- File: ${r.filePath} ---\n${r.content}\n\n`;
+									});
+								}
+							} catch (e) {
+								console.error("Astra DB RAG failed for Code Review:", e);
+							}
+						}
+
 						const res = await groqInstance.chat.completions.create({
 							model: "llama-3.3-70b-versatile",
 							messages: [
@@ -537,10 +840,10 @@ export function activate(context: vscode.ExtensionContext) {
 									content: `You are a Senior Software Engineer conducting a thorough Code Review.
                   Review the following git diff and provide a detailed markdown report covering:
                   1. 🎯 Executive Summary: What does this code change do?
-                  2. 🏗️ Architectural Impact: How might this affect other systems?
+                  2. 🏗️ Architectural Impact: How might this affect other systems? Reference the provided context if applicable.
                   3. ⚠️ Safety & Bugs: Identify logic flaws, missing error handling, or memory issues.
                   4. 📝 Actionable Feedback: Specific line-by-line recommendations.
-                  Be strict, constructive, and format beautifully in Markdown.`,
+                  Be strict, constructive, and format beautifully in Markdown.${ragContext}`,
 								},
 								{ role: "user", content: `PULL REQUEST DIFF:\n${diff.slice(0, 15000)}` },
 							],
@@ -941,33 +1244,69 @@ export function activate(context: vscode.ExtensionContext) {
 						title: 'Annotate.ai: Analyzing project...',
 					},
 					async () => {
-						// Get list of files in the workspace
-						const files = await vscode.workspace.findFiles('**/*', '**/node_modules/**', 100);
-
-						// Prioritize key files
-						const keyFiles = files.filter(file => {
-							const fileName = file.fsPath.toLowerCase();
-							return fileName.includes('package.json') ||
-								fileName.includes('readme') ||
-								fileName.includes('.md') ||
-								fileName.endsWith('.ts') ||
-								fileName.endsWith('.js') ||
-								fileName.endsWith('.py') ||
-								fileName.endsWith('.rs') ||
-								fileName.endsWith('.go');
-						}).slice(0, 10); // Limit to 10 key files
-
 						let projectInfo = `# Project Analysis\n\n`;
 
-						for (const file of keyFiles) {
+						// Fallback logic if Astra is not setup: use the old "first 10 files" code
+						let astraReady = await ensureAstra(context);
+						
+						if (astraReady) {
+							// RAG-based context gathering
 							try {
-								const document = await vscode.workspace.openTextDocument(file);
-								const content = document.getText();
-								if (content.length > 5000) continue; // Skip very large files
+								const db = getAstraDb()!;
+								const collection = await db.collection("code_snippets");
+								
+								// We query for the most important concepts to build a README
+								const queries = [
+									"Main entry point",
+									"Core architecture and services",
+									"Configuration and setup"
+								];
+								
+								const seenFiles = new Set<string>();
+								
+								for (const q of queries) {
+									const queryVector = await getEmbedding(q);
+									const results = await collection.find(
+										{},
+										{ sort: { $vector: queryVector }, limit: 4 }
+									).toArray();
+									
+									projectInfo += `### Context: ${q}\n`;
+									results.forEach((r: any) => {
+										if (!seenFiles.has(r._id)) {
+											projectInfo += `**File**: ${r.filePath} (Lines ${r.startLine}-${r.endLine})\n\`\`\`\n${r.content}\n\`\`\`\n\n`;
+											seenFiles.add(r._id);
+										}
+									});
+								}
+							} catch (e) {
+								console.error("Astra DB README generation failed:", e);
+								astraReady = false; // trigger fallback
+							}
+						}
 
-								projectInfo += `## ${file.fsPath.split('/').pop()}\n\n\`\`\`\n${content.slice(0, 2000)}\n\`\`\`\n\n`;
-							} catch (err) {
-								// Skip files that can't be read
+						if (!astraReady) {
+							// Old fallback mode
+							const files = await vscode.workspace.findFiles('**/*', '**/node_modules/**', 100);
+							const keyFiles = files.filter(file => {
+								const fileName = file.fsPath.toLowerCase();
+								return fileName.includes('package.json') ||
+									fileName.includes('readme') ||
+									fileName.includes('.md') ||
+									fileName.endsWith('.ts') ||
+									fileName.endsWith('.js') ||
+									fileName.endsWith('.py') ||
+									fileName.endsWith('.rs') ||
+									fileName.endsWith('.go');
+							}).slice(0, 10);
+
+							for (const file of keyFiles) {
+								try {
+									const document = await vscode.workspace.openTextDocument(file);
+									const content = document.getText();
+									if (content.length > 5000) continue;
+									projectInfo += `## ${file.fsPath.split('/').pop()}\n\n\`\`\`\n${content.slice(0, 2000)}\n\`\`\`\n\n`;
+								} catch (err) {}
 							}
 						}
 
