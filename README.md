@@ -79,4 +79,8 @@ To build and run this extension locally:
    # or
    npm run watch
    ```
+<<<<<<< HEAD
 4. Press `F5` in VS Code to open a new window with the extension loaded.
+=======
+4. Press `F5` in VS Code to open a new window with the extension loaded.
+>>>>>>> 10523a8df89623e61d62e0d39ed4b31353a5444f
