@@ -2,6 +2,10 @@
 
 **Annotate.ai** is an AI-powered, context-aware coding and annotation assistant for Visual Studio Code. It leverages advanced Large Language Models (LLMs) via **Groq** and a Serverless Vector Database (RAG) via **Astra DB** to deeply understand your codebase and commit history. It helps you write comments, understand code, review pull requests, and manage your Git workflow seamlessly.
 
+## 📦 Installation
+You can install **Annotate.ai** directly from the **Visual Studio Code Extension Marketplace**:
+[Install Annotate.ai](https://marketplace.visualstudio.com/items?itemName=Annotate-ai.annotate-ai)
+
 ## 🚀 Features
 
 * **AI Annotations:** Automatically generate intelligent inline comments for selected code snippets or orchestrate full-file documentation.
@@ -76,7 +80,3 @@ To build and run this extension locally:
    npm run watch
    ```
 4. Press `F5` in VS Code to open a new window with the extension loaded.
-
----
-
-*Made with ❤️ by Frank.*
