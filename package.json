@@ -2,7 +2,7 @@
   "name": "annotate-ai",
   "displayName": "Annotate.ai",
   "description": "AI-powered context-aware coding and annotation assistant.",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "type": "module",
   "publisher": "Annotate-ai",
   "engines": {
