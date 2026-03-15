@@ -1,7 +1,7 @@
 {
   "name": "annotate-ai",
   "displayName": "Annotate.ai",
-  "description": "",
+  "description": "AI-powered code annotation and authorship analysis.",
   "version": "0.1.1",
   "type": "module",
   "publisher": "Annotate-ai",
@@ -14,6 +14,25 @@
   "activationEvents": [],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "annotate-ai-explorer",
+          "title": "Annotate.ai",
+          "icon": "$(history)"
+        }
+      ]
+    },
+    "views": {
+      "annotate-ai-explorer": [
+        {
+          "id": "annotate-ai.fileHistoryView",
+          "name": "File History",
+          "type": "webview",
+          "icon": "$(history)"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "annotate-ai.annotateSelection",
@@ -26,6 +45,11 @@
         "icon": "$(comment)"
       },
       {
+        "command": "annotate-ai.toggleHoverExplainer",
+        "title": "Annotate: Toggle Hover Explainer",
+        "icon": "$(info)"
+      },
+      {
         "command": "annotate-ai.showDiff",
         "title": "Annotate: Show Changes",
         "icon": "$(eye)"
@@ -34,6 +58,41 @@
         "command": "annotate-ai.generateReadme",
         "title": "Annotate: Generate README",
         "icon": "$(book)"
+      },
+      {
+        "command": "annotate-ai.changeApiKeys",
+        "title": "Annotate: Change API Keys",
+        "category": "Annotate.ai"
+      },
+      {
+        "command": "annotate-ai.generateCommitMessage",
+        "title": "Annotate: Generate Commit Message",
+        "icon": "$(git-commit)"
+      },
+      {
+        "command": "annotate-ai.generatePRDescription",
+        "title": "Annotate: Generate PR Description",
+        "icon": "$(git-pull-request)"
+      },
+      {
+        "command": "annotate-ai.toggleGitBlame",
+        "title": "Annotate: Toggle Git Blame",
+        "icon": "$(organization)"
+      },
+      {
+        "command": "annotate-ai.copyCommitHash",
+        "title": "Copy Commit Hash",
+        "category": "Annotate.ai"
+      },
+      {
+        "command": "annotate-ai.showFileAtCommit",
+        "title": "Annotate: Show File At Commit",
+        "category": "Annotate.ai"
+      },
+      {
+        "command": "annotate-ai.aiCodeReview",
+        "title": "Annotate: AI Code Review",
+        "icon": "$(eye)"
       }
     ],
     "menus": {
@@ -57,6 +116,21 @@
           "command": "annotate-ai.generateReadme",
           "group": "navigation@4",
           "when": "editorTextFocus"
+        },
+        {
+          "command": "annotate-ai.toggleHoverExplainer",
+          "group": "navigation@5",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "annotate-ai.toggleGitBlame",
+          "group": "navigation@6",
+          "when": "editorTextFocus"
+        },
+        {
+          "command": "annotate-ai.changeApiKeys",
+          "group": "navigation@9",
+          "when": "editorTextFocus"
         }
       ],
       "editor/title": [
@@ -67,18 +141,35 @@
         },
         {
           "command": "annotate-ai.annotateFile",
-          "group": "navigation@2",
+          "group": "navigation@1",
           "when": "editorTextFocus"
         },
         {
           "command": "annotate-ai.showDiff",
-          "group": "navigation@3",
+          "group": "navigation@1",
           "when": "editorTextFocus"
         },
         {
           "command": "annotate-ai.generateReadme",
-          "group": "navigation@4",
+          "group": "navigation@1",
           "when": "editorTextFocus"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "annotate-ai.generateCommitMessage",
+          "group": "navigation@1",
+          "when": "scmProvider == git"
+        },
+        {
+          "command": "annotate-ai.generatePRDescription",
+          "group": "navigation@2",
+          "when": "scmProvider == git"
+        },
+        {
+          "command": "annotate-ai.aiCodeReview",
+          "group": "navigation@3",
+          "when": "scmProvider == git"
         }
       ]
     }
