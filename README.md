@@ -76,7 +76,3 @@ To build and run this extension locally:
    npm run watch
    ```
 4. Press `F5` in VS Code to open a new window with the extension loaded.
-
----
-
-*Made with ❤️ by Frank.*
