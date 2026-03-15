@@ -10,3 +10,9 @@ vsc-extension-quickstart.md
 **/*.ts
 **/.vscode-test.*
 .env
+.github/**
+.husky/**
+.git/**
+webpack.config.js
+node_modules/.bin/**
+src/**
